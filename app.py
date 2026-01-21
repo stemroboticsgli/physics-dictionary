@@ -1,18 +1,17 @@
 import streamlit as st
 import pandas as pd
 import os
+import re
 from gtts import gTTS
 import tempfile
 import datetime
+from deep_translator import GoogleTranslator
+from openai import OpenAI
 
-# ===== TRANSLATOR SAFE =====
-try:
-    from deep_translator import GoogleTranslator
-    TRANSLATE_OK = True
-except:
-    TRANSLATE_OK = False
+# ===== AI CLIENT =====
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-st.set_page_config(page_title="Physics Dictionary – Thầy Trung", layout="wide")
+st.set_page_config(page_title="Physics AI Tutor – Thầy Trung", layout="wide")
 
 USERS_FILE = "users.csv"
 LOG_FILE = "history.csv"
@@ -45,12 +44,73 @@ def speak_safe(text, lang="en"):
     except:
         return None
 
+
+# ===== EXTRACT NOUN / ENGLISH =====
+def extract_english_term(text):
+    patterns = [
+        r"\*\*Noun.*?\*\*\s*[:\-]\s*(.+)",
+        r"Noun.*?\s*[:\-]\s*(.+)",
+        r"\*\*English\*\*\s*[:\-]\s*(.+)",
+        r"-\s*English\s*[:\-]\s*(.+)",
+        r"English\s*[:\-]\s*(.+)"
+    ]
+
+    for p in patterns:
+        match = re.search(p, text, re.IGNORECASE)
+        if match:
+            term = match.group(1).strip()
+            term = term.split("\n")[0]
+            term = re.sub(r"[^\w\s\-]", "", term)
+            return term
+
+    return None
+# ===========================
+
+
+def physics_gpt_translate(word, mode):
+    if mode=="Anh → Việt":
+        prompt = f"""
+Bạn là giáo viên Vật lí THPT.
+Hãy dịch thuật ngữ "{word}" sang tiếng Việt theo đúng ngữ cảnh Vật lí.
+Trình bày:
+- English
+- Vietnamese
+- Explanation
+- Formula
+- Example
+"""
+    else:
+        prompt = f"""
+You are a physics teacher.
+Translate the Vietnamese physics term "{word}" into proper English physics terminology.
+
+Return in this format:
+- Noun (main term)
+- Verb form
+- Adjective form
+- Adverb form (if any)
+- Explanation (physics context)
+- Formula (if any)
+- Example sentence in physics
+"""
+
+    response = client.chat.completions.create(
+        model="gpt-4.1-mini",
+        messages=[
+            {"role": "system", "content": "You are a professional physics teacher."},
+            {"role": "user", "content": prompt}
+        ],
+        temperature=0.2,
+    )
+
+    return response.choices[0].message.content.strip()
+
 if "login" not in st.session_state:
     st.session_state.login = False
 
 # ================= LOGIN =================
 if not st.session_state.login:
-    st.title("🔐 Physics Dictionary – Thầy Trung")
+    st.title("🔐 Physics AI Tutor – Thầy Trung")
 
     tab1,tab2 = st.tabs(["Đăng nhập","Tạo tài khoản"])
 
@@ -89,47 +149,56 @@ if not st.session_state.login:
 
 # ================= MAIN =================
 st.sidebar.title("📘 Physics System")
-menu = st.sidebar.radio("Chức năng",
-        ["Tra từ","Phát âm","Thống kê"])
+menu = st.sidebar.radio("Chức năng",["Tra từ","Phát âm","Thống kê"])
 
 st.sidebar.write(f"👤 Người dùng: {st.session_state.user}")
 if st.sidebar.button("Đăng xuất"):
     st.session_state.login=False
     st.rerun()
 
-st.title("PHYSICS DICTIONARY – THẦY TRUNG")
+st.title("PHYSICS AI TUTOR – THẦY TRUNG")
 
 # ================= TRA TỪ =================
 if menu=="Tra từ":
     st.header("📖 Từ điển Anh – Việt – Việt – Anh")
     word = st.text_input("Nhập từ cần tra")
-    mode = st.selectbox("Chế độ",["Anh → Việt","Việt → Anh"])
+    mode = st.selectbox("Chế độ ngôn ngữ",["Anh → Việt","Việt → Anh"])
+    translate_type = st.radio("Kiểu dịch",["Phổ thông","Chuyên ngành Vật lí"])
 
     if st.button("Tra cứu"):
         if word:
-            if TRANSLATE_OK:
-                try:
+            try:
+                if translate_type=="Phổ thông":
                     if mode=="Anh → Việt":
                         result = GoogleTranslator(source='en', target='vi').translate(word)
-                        audio_lang="en"
+                        speak_word = word
                     else:
                         result = GoogleTranslator(source='vi', target='en').translate(word)
-                        audio_lang="en"
+                        speak_word = result
 
                     st.success(result)
 
-                    audio = speak_safe(result, audio_lang)
-                    if audio:
-                        st.audio(audio)
+                else:
+                    with st.spinner("AI đang phân tích vật lí..."):
+                        result = physics_gpt_translate(word,mode)
+                        st.markdown(result)
 
-                except:
-                    st.error("Lỗi mạng dịch")
+                        eng = extract_english_term(result)
+                        speak_word = eng if eng else word
 
-            else:
-                st.warning("⚠ Offline – chỉ hiển thị từ")
-                st.success(word)
+                # ===== PHÁT ÂM =====
+                st.divider()
+                st.subheader("🔊 Phát âm")
+                audio = speak_safe(speak_word, "en")
+                if audio:
+                    st.audio(audio)
+                else:
+                    st.warning("Không phát âm được")
 
-            log(st.session_state.user,word)
+                log(st.session_state.user,word)
+
+            except Exception as e:
+                st.error("Lỗi AI: "+str(e))
 
 # ================= PHÁT ÂM =================
 if menu=="Phát âm":
